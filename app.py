@@ -10,368 +10,302 @@ from pymongo import MongoClient
 
 load_dotenv()
 
-#Postgres schema helper
-PG_SCHEMA = os.getenv("PG_SCHEMA", "public")   # CHANGE: "public" to your own schema name
+# Postgres schema helper
+PG_SCHEMA = os.getenv("PG_SCHEMA", "public")
 def qualify(sql: str) -> str:
-    # Replace occurrences of {S}.<table> with <schema>.<table>
     return sql.replace("{S}.", f"{PG_SCHEMA}.")
 
 # CONFIG: Postgres and Mongo Queries
 CONFIG = {
     "postgres": {
         "enabled": True,
-        "uri": os.getenv("PG_URI", "postgresql+psycopg2://postgres:password@localhost:5432/postgres"),  # Will read from your .env file
+        "uri": os.getenv("PG_URI", "postgresql+psycopg2://postgres:password@localhost:5432/postgres"),
         "queries": {
-            #CHANGE: Replace all the following Postgres queries with your own queries, for each user you identified for your project's Information System
-            # Each query must have a unique name, an SQL string, a chart specification, tags (for user roles), and optional params (parameters)
-            # :doctor_id, :nurse_id, :patient_name, etc., are placeholders. Their values will come from the dashboard sidebar.
-            #User 1: DOCTORS 
-            "Doctor: patients under my care (table)": {
+            # User 1: MEMBERS
+            "Member: my workout sessions (table)": {
                 "sql": """
-                    SELECT p.patient_id, p.name AS patient, p.age, p.room_no
-                    FROM {S}.patients p
-                    WHERE p.doctor_id = :doctor_id 
-                    ORDER BY p.name;
+                    SELECT session_id, session_date, duration, calories_consumed, intensity_level
+                    FROM {S}.Workout_Session
+                    WHERE member_id = :member_id
+                    ORDER BY session_date DESC;
                 """,
                 "chart": {"type": "table"},
-                "tags": ["doctor"],
-                "params": ["doctor_id"]
+                "tags": ["member"],
+                "params": ["member_id"]
             },
-            "Doctor: most recent treatment per my patient (table)": {
+            "Member: calories burned this week (bar)": {
                 "sql": """
-                    SELECT p.name AS patient,
-                           (SELECT MAX(t.treatment_time)
-                              FROM {S}.treatments t
-                              WHERE t.patient_id = p.patient_id) AS last_treatment
-                    FROM {S}.patients p
-                    WHERE p.doctor_id = :doctor_id
-                    ORDER BY last_treatment DESC NULLS LAST;
+                    SELECT session_date::date as date, SUM(calories_consumed) as total_calories
+                    FROM {S}.Workout_Session
+                    WHERE member_id = :member_id
+                      AND session_date >= CURRENT_DATE - INTERVAL '7 days'
+                    GROUP BY session_date::date
+                    ORDER BY date;
+                """,
+                "chart": {"type": "bar", "x": "date", "y": "total_calories"},
+                "tags": ["member"],
+                "params": ["member_id"]
+            },
+            "Member: equipment usage summary (table)": {
+                "sql": """
+                    SELECT e.equipment_name, SUM(wse.usage_duration) as total_usage
+                    FROM {S}.Workout_Session_Equipment wse
+                    JOIN {S}.Equipment e ON wse.equipment_id = e.equipment_id
+                    JOIN {S}.Workout_Session ws ON wse.session_id = ws.session_id
+                    WHERE ws.member_id = :member_id
+                    GROUP BY e.equipment_name
+                    ORDER BY total_usage DESC;
                 """,
                 "chart": {"type": "table"},
-                "tags": ["doctor"],
-                "params": ["doctor_id"]
+                "tags": ["member"],
+                "params": ["member_id"]
             },
-            "Doctor: high-risk (age > threshold) under my care (bar)": {
+            "Member: workout intensity distribution (pie)": {
                 "sql": """
-                    SELECT p.name AS patient, p.age
-                    FROM {S}.patients p
-                    WHERE p.doctor_id = :doctor_id
-                      AND p.age > :age_threshold
-                    ORDER BY p.age DESC;
+                    SELECT intensity_level, COUNT(*) as session_count
+                    FROM {S}.Workout_Session
+                    WHERE member_id = :member_id
+                    GROUP BY intensity_level;
                 """,
-                "chart": {"type": "bar", "x": "patient", "y": "age"},
-                "tags": ["doctor"],
-                "params": ["doctor_id", "age_threshold"]
-            },
-            "Doctor: patients with NO treatment today (table)": {
-                "sql": """
-                    SELECT p.name, p.room_no
-                    FROM {S}.patients p
-                    WHERE p.doctor_id = :doctor_id
-                      AND NOT EXISTS (
-                        SELECT 1
-                        FROM {S}.treatments t
-                        WHERE t.patient_id = p.patient_id
-                          AND t.treatment_time::date = CURRENT_DATE
-                      );
-                """,
-                "chart": {"type": "table"},
-                "tags": ["doctor"],
-                "params": ["doctor_id"]
-            },
-            "Doctor: treatments by type for my patients (bar)": {
-                "sql": """
-                    SELECT t.treatment_type, COUNT(*)::int AS times_given
-                    FROM {S}.treatments t
-                    JOIN {S}.patients p ON p.patient_id = t.patient_id
-                    WHERE p.doctor_id = :doctor_id
-                    GROUP BY t.treatment_type
-                    ORDER BY times_given DESC;
-                """,
-                "chart": {"type": "bar", "x": "treatment_type", "y": "times_given"},
-                "tags": ["doctor"],
-                "params": ["doctor_id"]
+                "chart": {"type": "pie", "names": "intensity_level", "values": "session_count"},
+                "tags": ["member"],
+                "params": ["member_id"]
             },
 
-            #User 2: NURSES 
-            "Nurse: today’s tasks (treatments to administer) (table)": {
+            # User 2: PERSONAL TRAINERS
+            "Trainer: clients overview (table)": {
                 "sql": """
-                    SELECT p.name AS patient, t.treatment_type, t.treatment_time
-                    FROM {S}.treatments t
-                    JOIN {S}.patients p ON t.patient_id = p.patient_id
-                    WHERE t.nurse_id = :nurse_id
-                      AND t.treatment_time::date = CURRENT_DATE
-                    ORDER BY t.treatment_time;
+                    SELECT m.member_id, m.age, m.gender, m.height, m.weight, m.credit_score
+                    FROM {S}.Member m
+                    WHERE m.trainer_id = :trainer_id
+                    ORDER BY m.credit_score DESC;
                 """,
                 "chart": {"type": "table"},
-                "tags": ["nurse"],
-                "params": ["nurse_id"]
+                "tags": ["trainer"],
+                "params": ["trainer_id"]
             },
-            "Nurse: patients with NO treatment yet today (table)": {
+            "Trainer: client session completion rate (bar)": {
                 "sql": """
-                    SELECT p.name, p.room_no
-                    FROM {S}.patients p
-                    WHERE NOT EXISTS (
-                        SELECT 1
-                        FROM {S}.treatments t
-                        WHERE t.patient_id = p.patient_id
-                          AND t.treatment_time::date = CURRENT_DATE
-                    )
-                    ORDER BY p.room_no, p.name;
+                    SELECT m.member_id, 
+                           COUNT(ws.session_id) as total_sessions,
+                           ROUND(COUNT(ws.session_id) * 100.0 / NULLIF(:target_sessions, 0), 1) as completion_rate
+                    FROM {S}.Member m
+                    LEFT JOIN {S}.Workout_Session ws ON m.member_id = ws.member_id
+                    WHERE m.trainer_id = :trainer_id
+                      AND ws.session_date >= CURRENT_DATE - INTERVAL '30 days'
+                    GROUP BY m.member_id
+                    ORDER BY completion_rate DESC;
+                """,
+                "chart": {"type": "bar", "x": "member_id", "y": "completion_rate"},
+                "tags": ["trainer"],
+                "params": ["trainer_id", "target_sessions"]
+            },
+            "Trainer: workout plans (table)": {
+                "sql": """
+                    SELECT plan_id, plan_name, difficulty_level, cycle
+                    FROM {S}.Workout_Plan
+                    WHERE trainer_id = :trainer_id
+                    ORDER BY difficulty_level;
                 """,
                 "chart": {"type": "table"},
-                "tags": ["nurse"]
+                "tags": ["trainer"],
+                "params": ["trainer_id"]
             },
-            "Nurse: medicines running low (bar)": {
+            "Trainer: high intensity sessions (table)": {
                 "sql": """
-                    SELECT m.name, m.quantity
-                    FROM {S}.medicine_stock m
-                    WHERE m.quantity < :med_low_threshold
-                    ORDER BY m.quantity ASC;
+                    SELECT m.member_id, ws.session_date, ws.duration, ws.calories_consumed
+                    FROM {S}.Workout_Session ws
+                    JOIN {S}.Member m ON ws.member_id = m.member_id
+                    WHERE m.trainer_id = :trainer_id
+                      AND ws.intensity_level = 'High'
+                    ORDER BY ws.session_date DESC;
                 """,
-                "chart": {"type": "bar", "x": "name", "y": "quantity"},
-                "tags": ["nurse"],
-                "params": ["med_low_threshold"]
+                "chart": {"type": "table"},
+                "tags": ["trainer"],
+                "params": ["trainer_id"]
             },
 
-            #User 3: PHARMACISTS 
-            "Pharmacist: medicines to reorder (bar)": {
+            # User 3: GYM MANAGERS
+            "Manager: equipment usage frequency (bar)": {
                 "sql": """
-                    SELECT m.name, m.quantity
-                    FROM {S}.medicine_stock m
-                    WHERE m.quantity < :reorder_threshold
-                    ORDER BY m.quantity ASC;
+                    SELECT e.equipment_name, COUNT(wse.session_id) as usage_count
+                    FROM {S}.Equipment e
+                    LEFT JOIN {S}.Workout_Session_Equipment wse ON e.equipment_id = wse.equipment_id
+                    LEFT JOIN {S}.Workout_Session ws ON wse.session_id = ws.session_id
+                    WHERE ws.session_date >= CURRENT_DATE - INTERVAL '30 days'
+                    GROUP BY e.equipment_name
+                    ORDER BY usage_count DESC;
                 """,
-                "chart": {"type": "bar", "x": "name", "y": "quantity"},
-                "tags": ["pharmacist"],
-                "params": ["reorder_threshold"]
+                "chart": {"type": "bar", "x": "equipment_name", "y": "usage_count"},
+                "tags": ["manager"]
             },
-            "Pharmacist: top 5 medicines this month (bar)": {
+            "Manager: maintenance schedule (table)": {
                 "sql": """
-                    SELECT t.treatment_type AS medicine, COUNT(*)::int AS times_given
-                    FROM {S}.treatments t
-                    WHERE t.treatment_time >= date_trunc('month', CURRENT_DATE)
-                    GROUP BY t.treatment_type
-                    ORDER BY times_given DESC
-                    LIMIT 5;
-                """,
-                "chart": {"type": "bar", "x": "medicine", "y": "times_given"},
-                "tags": ["pharmacist"]
-            },
-            "Pharmacist: which nurse gave most medicines today (table)": {
-                "sql": """
-                    SELECT n.name, COUNT(t.treatment_id)::int AS total
-                    FROM {S}.nurses n
-                    JOIN {S}.treatments t ON t.nurse_id = n.nurse_id
-                    WHERE t.treatment_time::date = CURRENT_DATE
-                    GROUP BY n.name
-                    ORDER BY total DESC
-                    LIMIT 1;
-                """,
-                "chart": {"type": "table"},
-                "tags": ["pharmacist"]
-            },
-            "Pharmacist: medicines unused in last N days (table)": {
-                "sql": """
-                    SELECT m.name
-                    FROM {S}.medicine_stock m
-                    WHERE NOT EXISTS (
-                        SELECT 1
-                        FROM {S}.treatments t
-                        WHERE t.treatment_type = m.name
-                          AND t.treatment_time >= NOW() - (:days || ' days')::interval
-                    )
-                    ORDER BY m.name;
-                """,
-                "chart": {"type": "table"},
-                "tags": ["pharmacist"],
-                "params": ["days"]
-            },
-
-            # User 4: FAMILY/GUARDIANS 
-            "Family: last treatment for my relative (table)": {
-                "sql": """
-                    SELECT t.treatment_type, t.treatment_time, n.name AS nurse
-                    FROM {S}.treatments t
-                    JOIN {S}.patients p ON t.patient_id = p.patient_id
-                    LEFT JOIN {S}.nurses n ON t.nurse_id = n.nurse_id
-                    WHERE p.name = :patient_name
-                    ORDER BY t.treatment_time DESC
-                    LIMIT 1;
-                """,
-                "chart": {"type": "table"},
-                "tags": ["guardian"],
-                "params": ["patient_name"]
-            },
-            "Family: which doctor is assigned to my relative? (table)": {
-                "sql": """
-                    SELECT p.name AS patient, d.name AS doctor, d.specialization
-                    FROM {S}.patients p
-                    JOIN {S}.doctors d ON p.doctor_id = d.doctor_id
-                    WHERE p.name = :patient_name;
-                """,
-                "chart": {"type": "table"},
-                "tags": ["guardian"],
-                "params": ["patient_name"]
-            },
-            "Family: total treatments this month for my relative (table)": {
-                "sql": """
-                    SELECT COUNT(*)::int AS treatments_this_month
-                    FROM {S}.treatments t
-                    JOIN {S}.patients p ON t.patient_id = p.patient_id
-                    WHERE p.name = :patient_name
-                      AND t.treatment_time >= date_trunc('month', CURRENT_DATE);
-                """,
-                "chart": {"type": "table"},
-                "tags": ["guardian"],
-                "params": ["patient_name"]
-            },
-
-            # User 5: MANAGERS 
-            "Mgr: total patients & average age (table)": {
-                "sql": """
-                    SELECT COUNT(*)::int AS total_patients, AVG(age)::numeric(10,1) AS avg_age
-                    FROM {S}.patients;
+                    SELECT equipment_name, type, maintenance_date
+                    FROM {S}.Equipment
+                    WHERE maintenance_date <= CURRENT_DATE + INTERVAL '30 days'
+                    ORDER BY maintenance_date;
                 """,
                 "chart": {"type": "table"},
                 "tags": ["manager"]
             },
-            "Mgr: patients per doctor (bar)": {
+            "Manager: member demographics (table)": {
                 "sql": """
-                    SELECT d.name AS doctor, COUNT(*)::int AS num_patients
-                    FROM {S}.doctors d
-                    LEFT JOIN {S}.patients p ON d.doctor_id = p.doctor_id
-                    GROUP BY d.name
-                    ORDER BY num_patients DESC;
-                """,
-                "chart": {"type": "bar", "x": "doctor", "y": "num_patients"},
-                "tags": ["manager"]
-            },
-            "Mgr: treatments in last N days (table)": {
-                "sql": """
-                    SELECT COUNT(*)::int AS total_treatments
-                    FROM {S}.treatments
-                    WHERE treatment_time >= NOW() - (:days || ' days')::interval;
-                """,
-                "chart": {"type": "table"},
-                "tags": ["manager"],
-                "params": ["days"]
-            },
-            "Mgr: rooms currently occupied (table)": {
-                "sql": """
-                    SELECT DISTINCT p.room_no
-                    FROM {S}.patients p
-                    ORDER BY p.room_no;
+                    SELECT 
+                        COUNT(*) as total_members,
+                        AVG(age) as avg_age,
+                        AVG(height) as avg_height,
+                        AVG(weight) as avg_weight,
+                        AVG(credit_score) as avg_credit_score
+                    FROM {S}.Member;
                 """,
                 "chart": {"type": "table"},
                 "tags": ["manager"]
             },
-            "Mgr: doctor with oldest patients (table)": {
+            "Manager: peak hour analysis (bar)": {
                 "sql": """
-                    SELECT d.name, MAX(p.age) AS oldest_patient_age
-                    FROM {S}.doctors d
-                    JOIN {S}.patients p ON d.doctor_id = p.doctor_id
-                    GROUP BY d.name
-                    ORDER BY oldest_patient_age DESC
-                    LIMIT 1;
+                    SELECT EXTRACT(HOUR FROM session_date) as hour, COUNT(*) as session_count
+                    FROM {S}.Workout_Session
+                    WHERE session_date >= CURRENT_DATE - INTERVAL '30 days'
+                    GROUP BY EXTRACT(HOUR FROM session_date)
+                    ORDER BY hour;
+                """,
+                "chart": {"type": "bar", "x": "hour", "y": "session_count"},
+                "tags": ["manager"]
+            },
+
+            # User 4: SYSTEM ADMINISTRATORS
+            "Admin: device inventory (table)": {
+                "sql": """
+                    SELECT d.device_id, m.member_id, d.model, d.brand, d.purchase_date
+                    FROM {S}.Device d
+                    LEFT JOIN {S}.Member m ON d.member_id = m.member_id
+                    ORDER BY d.purchase_date DESC;
                 """,
                 "chart": {"type": "table"},
-                "tags": ["manager"]
+                "tags": ["admin"]
+            },
+            "Admin: sensor calibration status (table)": {
+                "sql": """
+                    SELECT s.sensor_id, s.type, s.calibration_date, d.model as device_model
+                    FROM {S}.Sensor s
+                    JOIN {S}.Device d ON s.device_id = d.device_id
+                    WHERE s.calibration_date <= CURRENT_DATE - INTERVAL '90 days'
+                    ORDER BY s.calibration_date;
+                """,
+                "chart": {"type": "table"},
+                "tags": ["admin"]
+            },
+            "Admin: data quality overview (table)": {
+                "sql": """
+                    SELECT data_quality, COUNT(*) as reading_count
+                    FROM {S}.Sensor_Reading
+                    WHERE timestamp >= CURRENT_DATE - INTERVAL '7 days'
+                    GROUP BY data_quality
+                    ORDER BY reading_count DESC;
+                """,
+                "chart": {"type": "table"},
+                "tags": ["admin"]
             }
         }
     },
 
     "mongo": {
         "enabled": True,
-        "uri": os.getenv("MONGO_URI", "mongodb://localhost:27017"),  # Will read from the .env file
-        "db_name": os.getenv("MONGO_DB", "eldercare"),               # Will read from the .env file
+        "uri": os.getenv("MONGO_URI", "mongodb://localhost:27017"),
+        "db_name": os.getenv("MONGO_DB", "smart_fitness_ecosystem"),
         
-        # CHANGE: Just like above, replace all the following Mongo queries with your own, for the different users you identified
         "queries": {
-            "TS: Hourly avg heart rate (resident 501, last 24h)": {
-                "collection": "bracelet_readings_ts",
+            "TS: Hourly avg heart rate (member M_1001, last 24h)": {
+                "collection": "sensor_readings",
                 "aggregate": [
                     {"$match": {
-                        "meta.resident_id": 501,
-                        "ts": {"$gte": dt.datetime.utcnow() - dt.timedelta(hours=24)}
+                        "member_id": "M_1001",
+                        "type": "Heart Rate Monitor",
+                        "timestamp": {"$gte": dt.datetime.utcnow() - dt.timedelta(hours=24)}
                     }},
                     {"$project": {
-                        "hour": {"$dateTrunc": {"date": "$ts", "unit": "hour"}},
-                        "hr": "$heart_rate_bpm"
+                        "hour": {"$dateTrunc": {"date": "$timestamp", "unit": "hour"}},
+                        "value": 1
                     }},
-                    {"$group": {"_id": "$hour", "avg_hr": {"$avg": "$hr"}, "n": {"$count": {}}}},
+                    {"$group": {"_id": "$hour", "avg_hr": {"$avg": "$value"}, "n": {"$count": {}}}},
                     {"$sort": {"_id": 1}}
                 ],
                 "chart": {"type": "line", "x": "_id", "y": "avg_hr"}
             },
 
-            "TS: Exceedance counts (SpO2 < 92, last 7 days) by resident": {
-                "collection": "bracelet_readings_ts",
+            "TS: High quality sensor readings (last 7 days)": {
+                "collection": "sensor_readings",
                 "aggregate": [
                     {"$match": {
-                        "ts": {"$gte": dt.datetime.utcnow() - dt.timedelta(days=7)},
-                        "spo2_pct": {"$lt": 92}
+                        "timestamp": {"$gte": dt.datetime.utcnow() - dt.timedelta(days=7)},
+                        "data_quality": "high"
                     }},
-                    {"$group": {"_id": "$meta.resident_id", "hits": {"$count": {}}}},
-                    {"$sort": {"hits": -1}}
+                    {"$group": {"_id": "$sensor_id", "high_quality_count": {"$count": {}}}},
+                    {"$sort": {"high_quality_count": -1}}
                 ],
-                "chart": {"type": "bar", "x": "_id", "y": "hits"}
+                "chart": {"type": "bar", "x": "_id", "y": "high_quality_count"}
             },
 
-            "Telemetry: Latest reading per device": {
-                "collection": "bracelet_data",
+            "Telemetry: Latest sensor readings per device": {
+                "collection": "sensor_readings",
                 "aggregate": [
-                    {"$sort": {"ts": -1, "_id": -1}},
-                    {"$group": {"_id": "$device_id", "doc": {"$first": "$$ROOT"}}},
+                    {"$sort": {"timestamp": -1}},
+                    {"$group": {"_id": "$sensor_id", "doc": {"$first": "$$ROOT"}}},
                     {"$replaceRoot": {"newRoot": "$doc"}},
                     {"$project": {
-                        "_id": 0, "device_id": 1, "resident_id": 1, "ts": 1,
-                        "hr": "$metrics.heart_rate_bpm", "spo2": "$metrics.spo2_pct",
-                        "status": 1
+                        "_id": 0, "sensor_id": 1, "member_id": 1, "timestamp": 1,
+                        "value": 1, "data_quality": 1, "type": 1
                     }}
                 ],
                 "chart": {"type": "table"}
             },
 
-            "Telemetry: Battery status distribution": {
-                "collection": "bracelet_data",
+            "Analytics: Data quality distribution": {
+                "collection": "sensor_readings",
                 "aggregate": [
-                    {"$project": {
-                        "battery": {"$ifNull": ["$battery_pct", None]},
-                        "bucket": {
-                            "$switch": {
-                                "branches": [
-                                    {"case": {"$gte": ["$battery_pct", 80]}, "then": "80–100"},
-                                    {"case": {"$gte": ["$battery_pct", 60]}, "then": "60–79"},
-                                    {"case": {"$gte": ["$battery_pct", 40]}, "then": "40–59"},
-                                    {"case": {"$gte": ["$battery_pct", 20]}, "then": "20–39"},
-                                ],
-                                "default": "<20 or null"
-                            }
-                        }
-                    }},
-                    {"$group": {"_id": "$bucket", "cnt": {"$count": {}}}},
-                    {"$sort": {"cnt": -1}}
+                    {"$match": {"timestamp": {"$gte": dt.datetime.utcnow() - dt.timedelta(days=1)}}},
+                    {"$group": {"_id": "$data_quality", "count": {"$count": {}}}},
+                    {"$sort": {"count": -1}}
                 ],
-                "chart": {"type": "pie", "names": "_id", "values": "cnt"}
+                "chart": {"type": "pie", "names": "_id", "values": "count"}
             },
 
-            "TS Treemap: readings count by resident and device (last 24h)": {
-                "collection": "bracelet_readings_ts",
+            "TS Treemap: readings count by member and sensor type (last 24h)": {
+                "collection": "sensor_readings",
                 "aggregate": [
-                    {"$match": {"ts": {"$gte": dt.datetime.utcnow() - dt.timedelta(hours=24)}}},
-                    {"$group": {"_id": {"resident": "$meta.resident_id", "device": "$meta.device_id"}, "cnt": {"$count": {}}}},
-                    {"$project": {"resident": "$_id.resident", "device": "$_id.device", "cnt": 1, "_id": 0}}
+                    {"$match": {"timestamp": {"$gte": dt.datetime.utcnow() - dt.timedelta(hours=24)}}},
+                    {"$group": {"_id": {"member": "$member_id", "sensor_type": "$type"}, "count": {"$count": {}}}},
+                    {"$project": {"member": "$_id.member", "sensor_type": "$_id.sensor_type", "count": 1, "_id": 0}}
                 ],
-                "chart": {"type": "treemap", "path": ["resident", "device"], "values": "cnt"}
+                "chart": {"type": "treemap", "path": ["member", "sensor_type"], "values": "count"}
+            },
+
+            "Analytics: Workout session sensor trends": {
+                "collection": "sensor_readings",
+                "aggregate": [
+                    {"$match": {
+                        "workout_session_id": {"$exists": True},
+                        "timestamp": {"$gte": dt.datetime.utcnow() - dt.timedelta(days=7)}
+                    }},
+                    {"$group": {
+                        "_id": {"session": "$workout_session_id", "type": "$type"},
+                        "avg_value": {"$avg": "$value"},
+                        "max_value": {"$max": "$value"},
+                        "readings_count": {"$count": {}}
+                    }},
+                    {"$sort": {"readings_count": -1}},
+                    {"$limit": 20}
+                ],
+                "chart": {"type": "table"}
             }
         }
     }
 }
 
-# The following block of code will create a simple Streamlit dashboard page
-st.set_page_config(page_title="Old-Age Home DB Dashboard", layout="wide")
-st.title("Old-Age Home | Mini Dashboard (Postgres + MongoDB)")
+# Streamlit dashboard configuration
+st.set_page_config(page_title="Smart Fitness Ecosystem Dashboard", layout="wide")
+st.title("Smart Fitness Ecosystem | Dashboard (Postgres + MongoDB)")
 
 def metric_row(metrics: dict):
     cols = st.columns(len(metrics))
@@ -442,10 +376,9 @@ def render_chart(df: pd.DataFrame, spec: dict):
     else:
         st.dataframe(df, use_container_width=True)
 
-# The following block of code is for the dashboard sidebar, where you can pick your users, provide parameters, etc.
+# Dashboard sidebar
 with st.sidebar:
     st.header("Connections")
-    # These fields are pre-filled from .env file
     pg_uri = st.text_input("Postgres URI", CONFIG["postgres"]["uri"])     
     mongo_uri = st.text_input("Mongo URI", CONFIG["mongo"]["uri"])        
     mongo_db = st.text_input("Mongo DB name", CONFIG["mongo"]["db_name"]) 
@@ -453,34 +386,27 @@ with st.sidebar:
     auto_run = st.checkbox("Auto-run on selection change", value=False, key="auto_run_global")
 
     st.header("Role & Parameters")
-    # CHANGE: Change the different roles, the specific attributes, parameters used, etc., to match your own Information System
-    role = st.selectbox("User role", ["doctor","nurse","pharmacist","guardian","manager","all"], index=5)
-    doctor_id = st.number_input("doctor_id", min_value=1, value=1, step=1)
-    nurse_id = st.number_input("nurse_id", min_value=1, value=2, step=1)
-    patient_name = st.text_input("patient_name", value="Alice")
-    age_threshold = st.number_input("age_threshold", min_value=0, value=85, step=1)
+    role = st.selectbox("User role", ["member", "trainer", "manager", "admin", "all"], index=4)
+    
+    # Parameters for different roles
+    member_id = st.selectbox("member_id", ["M_1001", "M_1002", "M_1003", "M_1004"])
+    trainer_id = st.selectbox("trainer_id", ["T_1001", "T_1002", "T_1003"])
+    target_sessions = st.number_input("target_sessions", min_value=1, value=10, step=1)
     days = st.slider("last N days", 1, 90, 7)
-    med_low_threshold = st.number_input("med_low_threshold", min_value=0, value=5, step=1)
-    reorder_threshold = st.number_input("reorder_threshold", min_value=0, value=10, step=1)
 
     PARAMS_CTX = {
-        "doctor_id": int(doctor_id),
-        "nurse_id": int(nurse_id),
-        "patient_name": patient_name,
-        "age_threshold": int(age_threshold),
+        "member_id": member_id,
+        "trainer_id": trainer_id,
+        "target_sessions": int(target_sessions),
         "days": int(days),
-        "med_low_threshold": int(med_low_threshold),
-        "reorder_threshold": int(reorder_threshold),
     }
 
-#Postgres part of the dashboard
+# Postgres part of the dashboard
 st.subheader("Postgres")
 try:
-    
     eng = get_pg_engine(pg_uri)
 
     with st.expander("Run Postgres query", expanded=True):
-        # The following will filter queries by role
         def filter_queries_by_role(qdict: dict, role: str) -> dict:
             def ok(tags):
                 t = [s.lower() for s in (tags or ["all"])]
